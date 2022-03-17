@@ -1,0 +1,522 @@
+\documentclass[a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[frenchb]{babel}
+\usepackage{aeguill}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{textcomp}
+\usepackage{tabularx}
+\usepackage{minted}
+%\usepackage{vaucanson}
+
+\setlength{\textheight}{240mm}
+\setlength{\textwidth}{162mm}
+\setlength{\topmargin}{-15mm}
+\setlength{\oddsidemargin}{+1mm}
+\setlength{\unitlength}{1cm}
+
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newtheorem{question}{Question}
+\newtheorem{remarque}{Remarque}
+
+\title{Architecture et système d'exploitation --- \\Bibliothèque de \emph{threads} partie 1}
+\author{Pascal Garcia}
+%\date{Année universitaire 2014--2015}
+\lstset{language=[ANSI]C}
+
+\begin{document}
+\maketitle
+
+\renewcommand{\labelitemi}{$\bullet$}
+\renewcommand{\labelitemii}{$\star$}
+
+\section{Création de \emph{threads}, ordonnancement et structures de données}
+
+Nous allons présenter les fonctions permettant de créer des \emph{threads}, de les rendre prêts à s'exécuter et les fonctions
+permettant de gérer l'ordonnancement entre les \emph{threads}.
+Nous présenterons ensuite les structures de données associées à la gestion des \emph{threads}.
+
+\subsection{Fonctions de création et de lancement}
+
+\begin{itemize}
+
+\item La fonction \mintinline{c}|int create_thread(long initial_address, int priority, char* name, int nb_args, ...);| 
+(fichier \verb+thread.h+) permet de créer un \emph{thread}. On a~:
+\begin{itemize}
+\item \verb+initial_address+ est l'adresse de la fonction qui sera le code du \emph{thread}~;
+\item \verb+priority+ est la priorité du \emph{thread}, plus cette valeur est grande et plus la priorité est importante~;
+\item \verb+name+ est le nom du \emph{thread}~;
+\item \verb+nb_args+ est le nombre de paramètres de la fonction représentant le code du \emph{thread}. On suppose que
+tous les arguments sont de type \mintinline{c}|int|~;
+\item la fonction retourne un entier représentant le numéro du \emph{thread} ou $-1$ si le \emph{thread} n'a pu être créé.
+Le \emph{thread} créé est initialement dans l'état \textit{suspendu} (état \mintinline{c}|SUSPENDED|). Pour le rendre prêt
+à être exécuté (état \mintinline{c}|READY|), il faut utiliser la fonction \mintinline{c}|resume| que nous décrivons ci-dessous.
+\end{itemize}
+
+\item La fonction \mintinline{c}|bool resume(int thread_id)| (fichier \verb+thread.h+)  permet de passer le \emph{thread} 
+\mintinline{c}|thread_id| de l'état \mintinline{c}|SUSPENDED| à l'état \mintinline{c}|READY|.\\
+
+\end{itemize}
+
+\subsection{Exemple}
+
+Nous donnons ci-dessous un exemple de programme que nous allons commenter~:
+\begin{minted}{c}
+
+#include <stdio.h>
+#include "thread.h"
+
+void fct(long n)
+{
+  while(1) {
+    printf("%ld\n", n);
+  }
+}
+
+int main()
+{
+  int t1 = create_thread((long)fct, DEFAULT_PRIORITY, "thread1", 1, 1);
+  int t2 = create_thread((long)fct, DEFAULT_PRIORITY, "thread2", 1, 2);
+  int t3 = create_thread((long)fct, DEFAULT_PRIORITY, "thread3", 1, 3);
+  resume(t1);
+  resume(t2);
+  resume(t3);
+  return 0;
+}
+
+\end{minted}
+
+Ce programme va créer trois \emph{threads}, dont le code est la fonction \mintinline{c}|fct|. La fonction \mintinline{c}|fct| pour le \emph{thread} \mintinline{c}|t1|
+aura comme paramètre la valeur \verb+1+, pour le \emph{thread} \mintinline{c}|t2| ce sera la valeur \verb+2+ et pour le \emph{thread} \verb+t3+ 
+la valeur \verb+3+. Les trois \emph{threads} passent dans l'état \mintinline{c}|READY| grâce 
+à la fonction \mintinline{c}|resume|. Notons que la fonction \mintinline{c}|main| est aussi un \emph{thread} qui est créé par une des fonctions d'initialisation de la bibliothèque.\\
+Lorsque l'on exécutera ce programme, on verra apparaître à l'écran une succession de \verb+1+, \verb+2+ et \verb+3+. Nous 
+allons décrire dans la sous-section suivante comment fonctionne l'ordonnancement entre les \emph{threads}.
+
+\subsection{Ordonnancement}
+
+Un \emph{thread} qui est prêt à s'exécuter (état \mintinline{c}|READY|) sera choisi par l'ordonnanceur selon sa priorité. Afin que tous les 
+\emph{threads} (ayant la priorité la plus forte) puissent être servis de manière équitable, il est alloué un certain quantum de temps ($100ms$)
+à chaque \emph{thread} avant que l'ordonnanceur ne soit appelé en vu de passer la main à un autre \emph{thread} de même priorité. La variable
+globale \mintinline{c}|preempt| permet de connaître le temps d'exécution restant pour le \emph{thread} en cours d'exécution.\\
+Toutes les $10ms$, le traitant d'interruption \mintinline{c}|clock_handler| est appelé. Son rôle est de compter le nombre
+de pas de temps (par tranche de $10ms$) qui s'est écoulé depuis le début du programme (les interruptions liées au \emph{timer} sont activées
+par une des fonctions d'initialisation de la bibliothèque) et d'appeler l'ordonnanceur quand le temps alloué au \emph{thread} courant
+est terminé.\\
+
+Le numéro du \emph{thread} courant est dans la variable globale \mintinline{c}|current_thread|. La liste globale \mintinline{c}|ready_list| contient
+les numéros des \emph{threads} prêts à s'exécuter triés par ordre de priorité. Le \emph{thread} courant n'est pas dans la \mintinline{c}|ready_list|.
+La fonction \mintinline{c}|bool reschedule()| permet de changer le \emph{thread} courant en passant la main à un des \emph{threads} dont le numéro est dans la \mintinline{c}|ready_list|. Cette fonction renvoie \mintinline{c}|true|
+si on a effectivement changé de \emph{thread}. Elle renvoie \mintinline{c}|false| si aucun \emph{thread} de même priorité (ou supérieure) n'était présent dans la \mintinline{c}|ready_list|.
+Notons que c'est cette fonction qui, entre autres, réinitialise la variable \mintinline{c}|preempt| pour que le \emph{thread} qui va prendre la main
+puisse avoir son quantum de temps d'exécution.\\
+
+La fonction \mintinline{c}|bool ready(int thread_id, bool resched)| est une fonction utilitaire qui permet de mettre dans la liste des prêts
+(\mintinline{c}|ready_list|) le \emph{thread} \mintinline{c}|thread_id| et d'appeler ou non la fonction \mintinline{c}|reschedule| si le paramètre \mintinline{c}|resched| est à la valeur 
+\mintinline{c}|true|. Cette fonction rend \mintinline{c}|true| si le numéro de \emph{thread} est correct et renvoie \mintinline{c}|false| sinon.\\
+
+\textbf{Question 1~:} compléter le traitant d'interruptions \mintinline{c}|clock_handler| (fichier \verb+time.c+) afin de passer la main à un autre \emph{thread} lorsque le quantum de temps du \emph{thread} en cours est dépassé. Compiler et exécuter le programme décrit plus haut afin de le tester.\\
+
+\subsection{Structures de données}
+
+Le fichier \verb+thread.h+ décrit les structures de données liées aux \emph{threads}. Nous allons les passer en revue.
+
+\begin{minted}{c}
+#define DEFAULT_PRIORITY 10
+\end{minted}
+
+Cette constante est utilisable par l'utilisateur lorsqu'il crée un \emph{thread} pour indiquer une priorité par défaut.
+
+\begin{minted}{c}
+#define MAX_NB_THREAD 16
+\end{minted}
+
+Cette constante permet de fixer le nombre maximum de \emph{threads} que l'utilisateur pourra créer.
+
+\begin{minted}{c}
+#define STACK_SIZE 65536
+\end{minted}
+
+Cette constante définie la taille de la pile allouée à un \emph{thread}.
+
+\begin{minted}{c}
+#define NULL_THREAD 0
+\end{minted}
+
+Cette constante est le numéro d'un \emph{thread} spécial qui est créé à l'initialisation du système. Ce \emph{thread} prend la main au lancement
+du système et lorsqu'aucun \emph{thread} n'est prêt à s'exécuter.
+
+\begin{minted}{c}
+#define is_bad_thread_id(x) (x <= 0 || x >= MAX_NB_THREAD)
+\end{minted}
+
+La \emph{macro} \mintinline{c}|is_bad_thread_id| permet de savoir si le numéro de \emph{thread} est un numéro valide. 
+
+\begin{minted}{c}
+#define NB_REGISTERS 8
+\end{minted}
+
+Cette constante définie le nombre de registres à sauvegarder lors d'un changement de contexte.
+
+\begin{minted}{c}
+enum {CURRENT, READY, WAITING, JOIN, ASLEEP, SUSPENDED, RECEIVE, FREE};
+\end{minted}
+
+Cette énumération représente les différents états dans lesquels peut se trouver un \emph{thread}~:\\
+\begin{itemize}
+\item \mintinline{c}|CURRENT|, le \emph{thread} est en cours d'exécution (il n'y a qu'un seul \emph{thread} dans cet état). Le numéro du
+\emph{thread} est alors dans la variable \mintinline{c}|current_thread|~;\\
+\item \mintinline{c}|READY|, le \emph{thread} est prêt à s'exécuter. Le numéro du \emph{thread} est alors dans la \mintinline{c}|ready_list|~;\\
+\item \mintinline{c}|WAITING|, le \emph{thread} est bloqué dans la file d'attente d'un sémaphore (voir la section suivante)~;\\
+\item \mintinline{c}|JOIN|, le \emph{thread} est en attente de la destruction d'un autre \emph{thread}~;\\
+\item \mintinline{c}|ASLEEP|, le \emph{thread} est endormi et sera réveillé par le \mintinline{c}|clock_handler| lorsque le temps d'attente sera écoulé~;\\
+\item \mintinline{c}|SUSPENDED|, le \emph{thread} est suspendu. Pour qu'il redevienne prêt à s'exécuter, il faut utiliser la méthode \mintinline{c}|resume|. C'est
+l'état initial d'un \emph{thread} après sa création~;\\
+\item \mintinline{c}|RECEIVE|, le \emph{thread} est dans l'attente d'un message~;\\
+\item \mintinline{c}|FREE|, le \emph{thread} n'est pas alloué.\\
+\end{itemize}
+
+\begin{minted}{c}
+typedef struct {
+  int   state;
+  int   priority;
+  int   semaphore;
+  char* name;     
+  long  registers[NB_REGISTERS];
+  long  stack[STACK_SIZE];
+  list  join_list;
+  int   join_thread;
+  int   message;
+  bool  received;
+} thread;
+\end{minted}
+
+Cette structure représente le contexte d'un \emph{thread}~:\\
+\begin{itemize}
+\item \mintinline{c}|state|, l'état du \emph{thread}~;\\
+\item \mintinline{c}|priority|, la priorité du \emph{thread} (plus ce nombre est élevé, plus la priorité est forte)~;\\
+\item \mintinline{c}|semaphore|, le numéro de sémaphore dans la file duquel le \emph{thread} est bloqué ou $-1$ si le \emph{thread} n'est dans la
+file d'attente d'aucun sémaphore. Ce numéro permet de retirer le \emph{thread} de la file 
+d'attente du sémaphore lors de la destruction du \emph{thread}~;\\
+\item \mintinline{c}|name|, le nom du \emph{thread}~;\\
+\item \mintinline{c}|registers|, la valeur des registres pour sauvegarder l'état de la machine lors de la commutation de contexte et pour 
+remettre correctement à jour les registres lorsque le \emph{thread} redevient actif~;\\
+\item \mintinline{c}|stack|, la pile du \emph{thread}. En effet, les variables locales, les paramètres des fonctions et les adresses de retour de celles-ci doivent être sauvegardées lors de la commutation de contexte, et remises à jour correctement lorsque le \emph{thread} reprend la main~;\\
+\item \mintinline{c}|join_list|, la liste des \emph{threads} qui sont en attente de la destruction de ce \emph{thread}. Lors de la destruction du \emph{thread},
+les \emph{thread} contenus dans cette liste vont être mis dans
+l'état \mintinline{c}|READY| et pourront donc de nouveau être exécutés~;\\
+\item \mintinline{c}|join_thread|, le \emph{thread} dont on attend la destruction. Ceci nous permet de retirer le \emph{thread} de la liste \mintinline{c}|join_list|
+du \emph{thread} \mintinline{c}|join_thread| lors de la destruction du \emph{thread} (sinon lorsque le \emph{thread} \mintinline{c}|join_thread| sera détruit il voudra
+remettre dans l'état \mintinline{c}|READY| un \emph{thread} qui n'existe plus ou qui n'est pas le bon)~;\\
+\item \mintinline{c}|message|, le message envoyé à ce \emph{thread} (dans cette implémentation, le message n'est qu'un entier)~;\\
+\item \mintinline{c}|received|, indique si un message a été envoyé à ce \emph{thread}.\\
+\end{itemize}
+
+\begin{minted}{c}
+extern thread thread_table[];
+\end{minted}
+
+Ce tableau contient les informations sur les \emph{threads}. Notons que le numéro d'un \emph{thread} correspond à son indice dans
+ce tableau.
+
+\begin{minted}{c}
+extern int nb_thread;
+\end{minted}
+
+Cette variable contient le nombre actuel de \emph{threads} dans le système.
+
+\begin{minted}{c}
+extern int current_thread;
+\end{minted}
+
+Cette variable contient le numéro du \emph{thread} courant (en cours d'exécution).
+
+\section{Atomicité}
+
+Dans notre gestionnaire de \emph{threads}, il est important d'assurer l'atomicité de certaines opérations. Par exemple,
+lors de la création d'un \emph{thread}, on va rechercher dans la table des \emph{threads} \mintinline{c}|thread_table| un \emph{thread} dont
+l'état est \mintinline{c}|FREE|. Le code pourrait analyser les entrées de la table \mintinline{c}|thread_table| et se rendre compte que l'entrée $2$, par exemple,
+est libre. S'il y a commutation de contexte à ce moment là, le \emph{thread} qui va prendre la main pourrait à son tour créer un autre \emph{thread}
+et voir que l'emplacement $2$ est libre dans la table \mintinline{c}|thread_table|. La seule façon de perdre la main pour un \emph{thread} non volontairement
+est d'être interrompu par une interruption. On dispose de trois fonctions permettant de masquer ou non les interruptions~:\\
+
+\begin{itemize}
+\item \mintinline{c}|void enable()|, autorise les interruptions~;\\
+
+\item \mintinline{c}|status disable()|, désactive les interruptions et renvoie l'état actuel des interruptions (masquées ou non)~;\\
+
+\item \mintinline{c}|void restore(status old)|, replace les interruptions dans l'état \mintinline{c}|old|.
+
+\end{itemize}
+
+\section{Synchronisation des \emph{threads}}
+
+Nous allons présenter les fonctions permettant de synchroniser les \emph{threads}.
+
+\subsection{Fonctions \emph{yield} et \emph{join}}
+
+La procédure \mintinline{c}|void yield()| permet au \emph{thread} courant de passer la main à un autre \emph{thread} de priorité supérieure ou égale (s'il y en a un). La
+fonction \mintinline{c}|bool join(int thread_id)| permet de mettre en attente le \emph{thread} courant jusqu'à la mort du \emph{thread} \mintinline{c}|thread_id|. Cette
+fonction renvoie \mintinline{c}|false| si le \emph{thread} \mintinline{c}|thread_id| n'existe pas. Elle renvoie \mintinline{c}|true| sinon.\\
+
+\textbf{Question 2~:} compléter le programme de la figure \ref{fig:prog2} (fichier \verb+main.c+) afin que l'affichage résultant de l'exécution de ce programme soit~:
+\begin{minted}{c}
+fct2
+fct1
+fin du main
+\end{minted}
+
+\begin{figure}[!htpb]
+\begin{minted}{c}
+    #include <stdio.h>
+    #include "thread.h"
+
+    void fct1(long t)
+    {
+      printf("fct1\n");
+    }
+
+    void fct2()
+    {
+      printf("fct2\n");
+    }
+
+    int main()
+    {
+      int t2 = create_thread((long)fct2, DEFAULT_PRIORITY, "thread2", 0);
+      int t1 = create_thread((long)fct1, DEFAULT_PRIORITY, "thread1", 1, t2);
+      resume(t1);
+      resume(t2);
+      printf("fin du main\n");
+      return 0;
+    }
+\end{minted}
+\caption{Programme à compléter pour obtenir l'affichage décrit dans le texte}
+\label{fig:prog2}
+\end{figure}
+
+\textbf{Question 3~:} compléter la procédure \mintinline{c}|yield| et la fonction \mintinline{c}|join| (fichier \verb+yield.c+ et \verb+join.c+).
+
+\subsection{Sémaphores}
+
+\subsubsection{Principe}
+
+Les \emph{sémaphores} vont permettre de synchroniser les \emph{threads} de maniére plus fine. Un sémaphore possède un compteur et quatre opérations~:\\
+
+\begin{itemize}
+
+\item l'opération de création, qui permet de créer un sémaphore en initialisant son compteur à la valeur désirée~;\\
+
+\item l'opération de destruction, qui permet de détruire le sémaphore~;\\
+
+\item l'opération \emph{P} décrémente le compteur et~:
+\begin{itemize}
+\item si le compteur est négatif, le \emph{thread} courant est mis dans l'état \mintinline{c}|WAITING|, il est placé dans la file d'attente associée au
+sémaphore et un autre \emph{thread} prend la main~;
+\item si le compteur est positif ou nul, le \emph{thread} courant garde la main.\\
+\end{itemize}
+
+\item l'opération \emph{V} incrémente le compteur et~:
+\begin{itemize}
+\item si le compteur est négatif ou nul, un \emph{thread} de la file d'attente du sémaphore est retiré de celle-ci et placé dans
+la \mintinline{c}|ready_list|~;
+\item si le compteur est strictement positif, aucune autre action est nécessaire.\\
+\end{itemize} 
+
+\end{itemize}
+
+Dans notre gestionnaire de \emph{threads}, l'opération de création d'un \emph{semaphore} est la fonction \\
+\mintinline{c}|int create_semaphore(int count)|,
+elle prend en paramètre la valeur initiale du compteur et retourne l'identifiant du sémaphore ou $-1$ s'il n'y a plus de sémaphore disponible.\\
+
+L'opération de destruction d'un sémaphore est la fonction 
+\mintinline{c}|bool destroy_semaphore(int sem)|. Elle prend en paramètre l'identifiant d'un \emph{sémaphore}
+et le détruit. Cette fonction retourne \mintinline{c}|true| si l'identifiant est valide et \mintinline{c}|false| sinon.\\
+
+L'opération \emph{P} est la fonction \mintinline{c}|bool p(int sem)|. Elle prend en paramètre l'identifiant d'un 
+sémaphore, elle renvoie \mintinline{c}|false| si le numéro de \emph{sémaphore} passé en paramètre n'est pas valide et renvoie \mintinline{c}|true| sinon.\\
+
+L'opération \emph{V} est la fonction \mintinline{c}|bool v(int sem)|. Elle prend en paramètre l'identifiant d'un 
+sémaphore, elle renvoie \mintinline{c}|false| si le numéro de \emph{sémaphore} passé en paramètre n'est pas valide et renvoie \mintinline{c}|true| sinon.\\
+
+\begin{figure}[!htpb]
+\begin{minted}{c}
+#include <stdio.h>
+#include "thread.h"
+#include "semaphore.h"
+
+volatile int n = 0;
+
+void fct1()
+{
+  for (unsigned int i = 0; i < N; i++) n++;
+}
+
+void fct2()
+{
+  for (unsigned int i = 0; i < N; i++) n--;
+}
+
+int main()
+{
+  int t1 = create_thread((long)fct1, DEFAULT_PRIORITY, "thread1", 0);
+  int t2 = create_thread((long)fct2, DEFAULT_PRIORITY, "thread2", 0);
+  resume(t1);
+  resume(t2);
+  join(t1);
+  join(t2);
+  printf("%d\n",n);
+  return 0;
+}
+\end{minted}
+\caption{Programme à compléter pour protéger l'accès à la variable globale}
+\label{fig:prog3}
+\end{figure}
+
+\textbf{Question 4~:} soit le programme de la figure \ref{fig:prog3} (fichier \verb+main.c+). Si on exécute ce programme, la valeur de $n$ affichée
+dans le \verb+main+ pourra être différente de $0$. Pourquoi~?\\
+On voudrait protéger l'accès à la variable globale \mintinline{c}|n|. Ajouter
+un sémaphore permettant de résoudre ce problème.\\
+
+\begin{figure}[!htpb]
+\begin{minted}{c}
+    #include <stdio.h>
+    #include "thread.h"
+    #include "semaphore.h"
+
+    void fct1()
+    {
+      printf("avant synchronisation\n");
+      printf("après synchronisation\n");
+    }
+
+    void fct2()
+    {
+      printf("avant synchronisation\n");
+      printf("après synchronisation\n");
+    }
+
+    void fct3()
+    {
+      printf("avant synchronisation\n");
+      printf("après synchronisation\n");
+    }
+
+    int main()
+    {
+      resume(create_thread((long)fct1, DEFAULT_PRIORITY, "thread1", 0));
+      resume(create_thread((long)fct2, DEFAULT_PRIORITY, "thread2", 0));
+      resume(create_thread((long)fct3, DEFAULT_PRIORITY, "thread3", 0));
+      return 0;
+    }
+\end{minted}
+\caption{Programme à compléter pour obtenir un rendez-vous}
+\label{fig:prog4}
+\end{figure}
+
+\textbf{Question 5~:} soit le programme de la figure \ref{fig:prog4} (fichier \verb+main.c+). On voudrait faire en sorte que les trois messages \verb+avant synchronisation+ s'affichent avant les trois messages \verb+après synchronisation+. Réaliser ceci grâce à des sémaphores.
+
+\subsubsection{Structures de données}
+
+Les structures de données associées à un \emph{sémaphore} sont les suivantes (fichier \verb+semaphore.h+)~:
+
+\begin{minted}{c}
+typedef struct {
+  int state;
+  int count;
+  list waiting_list;
+} semaphore;
+\end{minted}
+
+\begin{itemize}
+\item \mintinline{c}|state| indique si le sémaphore est utilisé ou non (\mintinline{c}|SFREE| ou \mintinline{c}|SUSED|)~;\\
+
+\item \mintinline{c}|count| est le compteur associé au sémaphore~;\\
+
+\item \mintinline{c}|waiting_list| est la liste des \emph{threads} en attente sur ce sémaphore.\\
+
+\end{itemize}
+
+Le tableau \mintinline{c}|extern semaphore semaphore_table[];| 
+contient les informations sur les \emph{semaphores}. Le numéro d'un \emph{semaphore} correspond à son indice dans ce tableau.\\
+
+\textbf{Question 6~:} implémenter la fonction \mintinline{c}|bool p(int sem)| (fichier \verb+semaphore.c+) qui réalise l'opération \emph{P} décrite ci-dessus.\\
+
+\textbf{Question 7~:} implémenter la fonction \mintinline{c}|bool v(int sem)| (fichier \verb+semaphore.c+) qui réalise l'opération \emph{V} décrite ci-dessus.\\
+
+\section{Communication entre \emph{threads}}
+
+Nous allons proposer un mécanisme simple de communication entre \emph{threads} grâce aux fonctions \mintinline{c}|send| et \mintinline{c}|receive| dont
+le fonctionnement est décrit ci-dessous~:\\
+
+\begin{itemize}
+
+\item \mintinline{c}|int receive()|. Lorsque le \emph{thread} courant fait cet appel, deux cas de figures peuvent se passer~:
+\begin{itemize}
+\item un message lui a déjà été envoyé par un autre \emph{thread} et cet appel retourne immédiatement le message reçu après avoir
+mis à \mintinline{c}|false| le champ \mintinline{c}|received| du contexte du \emph{thread} courant~;
+\item aucun message ne lui a encore été envoyé, et le \emph{thread} courant est alors mis en attente dans l'état \mintinline{c}|RECEIVE|.\\
+\end{itemize}
+
+\item \mintinline{c}|bool send(int thread_id, int message)| permet d'envoyer au \emph{thread} \mintinline{c}|thread_id| l'entier \mintinline{c}|message|.
+L'entier
+\verb+message+ est copié dans le champ \mintinline{c}|message| du contexte associé au \emph{thread} \mintinline{c}|thread_id| et le champ
+\mintinline{c}|received| de cette structure est mis à \mintinline{c}|true|. Si le \emph{thread} \mintinline{c}|thread_id| était en attente de recevoir un message, 
+il est alors remis dans la \mintinline{c}|ready_list|. La fonction retourne alors la valeur \mintinline{c}|true|.\\
+Notons que si un message
+n'avait pas encore été lu par le \emph{thread} \mintinline{c}|thread_id|, ou si l'identifiant \mintinline{c}|thread_id| n'existe pas, la fonction ne fait que renvoyer
+\mintinline{c}|false|.\\
+
+\end{itemize}
+
+\begin{figure}[!htpb]
+\begin{minted}{c}
+    #include <stdio.h>
+    #include "thread.h"
+    #include "message.h"
+
+    int t1, t2;
+
+    void fct1()
+    {
+    }
+
+    void fct2()
+    {
+    }
+
+    int main()
+    {
+      t1 = create_thread((long)fct1, DEFAULT_PRIORITY, "thread1", 0);
+      t2 = create_thread((long)fct2, DEFAULT_PRIORITY, "thread2", 0);
+      resume(t1);
+      resume(t2);
+      return 0;
+    }
+\end{minted}
+\caption{Programme à compléter afin d'envoyer des messages entre deux \emph{threads}}
+\label{fig:prog5}
+\end{figure}
+
+
+\textbf{Question 8~:} soit le programme de la figure \ref{fig:prog5} (fichier \verb+main.c+). 
+On veut que le \emph{thread1} envoie $10$ messages (les entiers de $0$ à $9$) au \emph{thread2} qui les affichera. 
+Réaliser ceci grâce aux primitives \mintinline{c}|send| et \mintinline{c}|receive|.\\
+
+\textbf{Question 9~:} implémenter les fonctions \mintinline{c}|send| et \mintinline{c}|receive| (fichier \verb+message.c+).
+
+\section{Endormir un \emph{thread}}
+
+La fonction \mintinline{c}|bool sleep(int n)| (fichier \verb+sleep.h+)
+permet d'endormir le \emph{thread} courant pendant $(n\times 10)ms$. Cette fonction retourne \mintinline{c}|true| si $n > 0$ et \mintinline{c}|false| sinon.
+Un \emph{thread} mis en sommeil sera mis dans l'état \mintinline{c}|ASLEEP|.\\
+
+La procédure \mintinline{c}|void wake_up()| (fichier \verb+sleep.h+) permet de réveiller le ou les \emph{threads} dont le temps de mise en sommeil
+est terminé (cette procédure est appelée dans le traitant d'interruption \mintinline{c}|clock_handler| à chaque appel de celui-ci).\\
+
+\textbf{Question 10~:} implémenter puis tester les fonctions \mintinline{c}|sleep| et \mintinline{c}|wake_up| (fichier \verb+sleep.c+).
+
+\end{document}

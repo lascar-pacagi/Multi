@@ -1,0 +1,311 @@
+\documentclass[a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[frenchb]{babel}
+\usepackage{aeguill}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{textcomp}
+\usepackage{tabularx}
+\usepackage{minted}
+%\usepackage{vaucanson}
+
+\setlength{\textheight}{230mm}
+\setlength{\textwidth}{160mm}
+\setlength{\topmargin}{-10mm}
+\setlength{\oddsidemargin}{+1mm}
+\setlength{\unitlength}{1cm}
+
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newtheorem{question}{Question}
+\newtheorem{remarque}{Remarque}
+
+
+\title{Architecture et système d'exploitation --- \\Bibliothèque de \emph{threads} partie 2}
+\author{Pascal Garcia}
+%\date{Année universitaire 2014--2015}
+\lstset{language=[ANSI]C}
+
+\begin{document}
+\maketitle
+
+\renewcommand{\labelitemi}{$\bullet$}
+\renewcommand{\labelitemii}{$\star$}
+
+\section{Création de \emph{threads}}
+
+Nous avons utiliser dans le \emph{TP} précédent la fonction \mintinline{c}|create_thread|, qui permet à l'utilisateur
+de créer des \emph{threads}. Nous allons maintenant implémenter cette fonction, mais nous allons tout d'abord
+regarder comment le compilateur \emph{gcc} gère l'appel d'une procédure, et comment utiliser une liste variable
+d'arguments en \emph{C}.
+
+\subsection{Gestion des appels de procédures par le compilateur \emph{gcc}}
+
+Lors de l'appel à une fonction, au tout début de l'entrée dans la fonction, le haut de la pile contient l'adresse de retour. Les $6$ premiers
+arguments de la fonction se trouvent respectivement dans les registres de $64$ bits~: \verb+rdi+, \verb+rsi+, \verb+rdx+, \verb+rcx+, \verb+r8+ et \verb+r9+ et
+les autres arguments se trouvent dans la pile. Pour simplifier, nous n'utiliserons pas plus de $6$ arguments pour un \verb+thread+ et donc nous ne nous soucierons
+pas de la gestion des arguments dans la pile. Nous rappelons que la pile croît des adresses les plus hautes vers les adresses les plus basses.\\
+
+En fin de fonction, avant l'instruction \verb+ret+, le pointeur de pile (\verb+rsp+) pointe sur l'adresse de retour et l'instruction \verb+ret+ aura pour effet de dépiler cette
+valeur dans le compteur ordinal (\verb+rip+).
+
+\subsection{Utilisation d'une liste variable d'arguments en \emph{C}}
+
+Nous allons illustrer l'utilisation des listes variables d'arguments grâce au programme suivant~:\\
+
+\begin{minted}{c}
+#include <stdarg.h>
+#include <stdio.h>
+
+void affiche(int nb_args, ...)
+{
+  va_list varg;
+  va_start(varg, nb_args);
+  for (int j = 0; j < nb_args; j++)
+    {      
+      printf("paramètre %d : %d\n", j+1, va_arg(varg, int));
+    }
+  va_end(varg);
+}
+
+int main() {
+  affiche(5, 1, 2, 3, 4, 5);
+  return 0;
+}
+\end{minted}
+
+Après avoir déclaré une variable \mintinline{c}|varg| de type \mintinline{c}|va_list|, on l'initialise grâce à la procédure \mintinline{c}|va_start| en donnant
+en paramètre le nombre d'arguments. On peut ensuite accéder aux différents arguments en précisant leurs types grâce à la fonction
+\mintinline{c}|va_arg|. Enfin, on appel la procédure \mintinline{c}|va_end| (à chaque invocation de \mintinline{c}|va_start| doit correspondre une invocation de \mintinline{c}|va_end| dans la même fonction).
+
+\subsection{Implémentation}
+
+Nous allons maintenant implémenter la fonction~:
+\begin{minted}{c}
+int create_thread(long initial_address, int priority, char* name, int nb_args, ...)
+\end{minted}
+qui va nous permettre de créer des \emph{threads}. Pour ce faire, nous allons avoir besoin~:
+\begin{itemize}
+\item de la procédure \mintinline{c}|enable_interrupt| qui permet de démasquer les interruptions (fichier \verb+thread.c+) dont le code est le suivant~:
+\begin{minted}{c}
+void enable_interrupt() 
+{
+  thread* threadptr = &thread_table[current_thread];
+  enable();
+  long rdi, rsi, rdx, rcx, r8, r9;
+  rdi = threadptr->registers[REGISTER_TO_INDEX(RDI)];
+  rsi = threadptr->registers[REGISTER_TO_INDEX(RSI)];
+  rdx = threadptr->registers[REGISTER_TO_INDEX(RDX)];
+  rcx = threadptr->registers[REGISTER_TO_INDEX(RCX)];
+  r8 = threadptr->registers[REGISTER_TO_INDEX(R8)];
+  r9 = threadptr->registers[REGISTER_TO_INDEX(R9)];
+  __asm__ volatile("movq %0, %%rdi\n\t"
+      "movq %1, %%rsi\n\t"
+      "movq %2, %%rdx\n\t"
+      "movq %3, %%rcx\n\t"
+      "movq %4, %%r8\n\t"
+      "movq %5, %%r9\n\t"
+      ::"g"(rdi), "g"(rsi), "g"(rdx), "g"(rcx), "g"(r8), "g"(r9)
+      : "rdi", "rsi", "rdx", "rcx", "r8", "r9");
+}
+\end{minted}
+\vspace{0.4cm}
+Cette procédure permet de démasquer les interruptions lorsque le \emph{thread} va prendre la main pour la première fois. Cette procédure fait appel à la procédure \mintinline{c}|enable|
+permettant de démasquer les interruptions, et restaurent ensuite les registres contenant les paramètres éventuels du \emph{thread} qui sont écrasés par l'appel à \mintinline{c}|enable|.\\
+
+\item de la procédure \mintinline{c}|userret| qui détruit le \emph{thread} courant et dont le code est simplement~:\\
+\begin{minted}{c}
+void userret()
+{
+  destroy_thread(get_thread_id());
+}
+\end{minted} 
+\vspace{0.4cm}
+Lorsqu'un \emph{thread} sera terminé, cette procédure va permettre de libérer ses ressources et de passer la main
+à un autre \emph{thread}.\\
+
+\end{itemize}
+
+La fonction \mintinline{c}|create_thread| doit réaliser les opérations suivantes~:
+
+\begin{itemize}
+
+\item chercher un numéro de \emph{thread} libre (index correspondant à une entrée \mintinline{c}|FREE| du tableau \mintinline{c}|thread_table|)~;
+\item ajouter l'identifiant du \emph{thread} dans la liste \mintinline{c}|alive_list| (fichier \verb+thread.h+) qui permet de connaître
+les \emph{threads} présents dans le système (la liste \mintinline{c}|ready_list| ne suffit pas)~; 
+\item mettre à jour la pile du \emph{thread} (l'adresse la plus basse de la pile correspond à l'adresse de \mintinline{c}|stack[0]| de la structure
+\mintinline{c}|thread| (fichier \verb+thread.h+)) afin qu'elle soit comme celle de la figure \ref{fig:stack}. Nous allons maintenant expliquer
+pourquoi la pile initiale du \emph{thread} doit avoir cette forme. Nous verrons dans la section suivante que la commutation entre
+deux \emph{threads} se fera dans une procédure écrite en assembleur qui aura la forme suivante~:\\
+\begin{verbatim}
+sauvegarde des registres du thread qui perd la main
+restauration des registres du thread qui va prendre la main
+ret
+\end{verbatim}
+\vspace{0.4cm}
+\noindent L'instruction assembleur \verb+ret+ (retour d'un appel de fonction) a pour effet de mettre dans le compteur ordinal 
+la valeur en sommet de pile et d'incrémenter
+le pointeur de pile. Donc, lorsque l'on commutera pour la première fois sur un \emph{thread}, l'instruction \verb+ret+ aura pour effet de mettre
+dans le compteur ordinal l'adresse de la procédure \mintinline{c}|enable_interrupt| (qui permet de démasquer les interruptions). Quand cette procédure se
+terminera, son instruction \verb+ret+ aura pour effet de mettre dans le compteur ordinal l'adresse de la fonction qui correspond au 
+code du \emph{thread}. La pile
+aura alors la forme indiquée dans la figure \ref{fig:stack2}. On voit alors que l'adresse de retour de la fonction est le début du code de la 
+fonction \mintinline{c}|userret| qui permettra de libérer les ressources allouées au \emph{thread} et de passer la main à un autre \emph{thread}.\\
+Pour résumer la fonction \mintinline{c}|create_thread| doit~;
+\item mettre à jour les registres de la structure \mintinline{c}|thread| correspondants aux paramètres du \emph{thread}~;
+\item mettre
+à jour le registre \mintinline{c}|RSP| de la structure \mintinline{c}|thread| qui indique la valeur sauvegardée (ici la valeur initiale) du pointeur
+de pile~;
+\item mettre à jour l'état du \emph{thread} (initialement dans l'état \mintinline{c}|SUSPENDED|), sa priorité, son nom~;
+\item incrémenter le nombre de \emph{threads} existant dans le système (variable globale \mintinline{c}|nb_thread|).
+\end{itemize}
+
+\begin{figure}[!htpb]
+\begin{center}
+\begin{verbatim}
+                                vers les adresses basses
+
+                                +------------------+
+                                | ...              |
+                                +------------------+
+                                | enable_interrupt | <- %rsp
+                                +------------------+
+                                | initial_address  |
+                                +------------------+
+                                | userret          |
+                                +------------------+
+\end{verbatim}
+\caption{\'Etat initial de la pile d'un \emph{thread}}
+\label{fig:stack}
+\end{center}
+\end{figure}
+
+\begin{figure}[!htpb]
+\begin{center}
+\begin{verbatim}
+                                vers les adresses basses
+
+                                +------------------+
+                                | ...              |
+                                +------------------+
+                                | enable_interrupt |
+                                +------------------+
+                                | initial_address  | 
+                                +------------------+
+                                | userret          | <- %rsp
+                                +------------------+
+\end{verbatim}
+\caption{\'Etat de la pile lorsque le code de la fonction correspondante au \emph{thread} va être exécuté}
+\label{fig:stack2}
+\end{center}
+\end{figure}
+
+\textbf{Question 1~:} Implémenter la fonction \mintinline{c}|create_thread| (fichier \verb+thread.c+).\\
+
+\section{Changement de contexte}
+
+Nous allons maintenant réaliser la commutation de contexte entre deux \emph{threads}. Pour ce faire, nous aurons besoin d'une
+procédure écrite en assembleur (fichier \verb+ctxsw.h+)~:
+\begin{minted}{c}
+void ctxsw(long* old_registers, long* new_registers)
+\end{minted}
+Le paramètre \mintinline{c}|old_registers| est l'adresse du tableau \mintinline{c}|long registers[NB_REGISTERS]| (voir la 
+structure \mintinline{c}|thread| du fichier \verb+thread.h+) du \emph{thread} courant qui va perdre
+la main. Le paramètre \mintinline{c}|new_registers| est l'adresse du tableau \mintinline{c}|long registers[NB_REGISTERS]| du \emph{thread} qui 
+va prendre la main.
+Cette procédure va permettre de sauvegarder les registres du \emph{thread} courant dans le tableau dont l'adresse est \mintinline{c}|old_registers|
+et de mettre à jour les registres de la machine grâce aux valeurs contenues dans le tableau situé à l'adresse \mintinline{c}|new_registers|.
+Si \verb+thread1+ est le \emph{thread} courant et \verb+thread2+ le \emph{thread} vers lequel on veut commuter, on effectuera l'appel suivant~:
+\begin{minted}{c}
+ctxsw(thread_table[thread1].registers, thread_table[thread2].registers)
+\end{minted}
+
+\textbf{Question 2~:} Implémenter la fonction \mintinline{c}|bool reschedule()| (fichier \verb+reschedule.c+) qui~:
+\begin{itemize}
+\item choisit un des \emph{threads} de la \mintinline{c}|ready_list| de priorité supérieure ou égale
+à la priorité du \emph{thread} courant et,
+\item effectue le changement de contexte entre le \emph{thread} courant et le \emph{thread} qui va prendre la main.
+\end{itemize}
+Cette fonction rend \mintinline{c}|false| si on n'a pas trouvé de \emph{thread} de priorité supérieure ou égale et \mintinline{c}|true| sinon.
+
+\vspace{1cm}
+
+Nous allons maintenant écrire la procédure \mintinline{c}|ctxsw|, mais pour ce faire nous allons décrire la partie de la syntaxe
+assembleur qui nous sera utile~:
+
+\begin{itemize}
+
+\item \verb+%rax+, \verb+%rbx+, \verb+%rcx+, \verb+%rdx+, \verb+%rsi+, \verb+%rdi+, \verb+%rbp+, \verb+%rsp+, \verb+%r8+,
+\verb+%r9+, \verb+%r10+, \verb+%r11+, \verb+%r12+, \verb+%r13+, \verb+%r14+ et \verb+%r15+ sont
+les registres ($64$ bits) qu'il faudra sauvegarder dans le champ \mintinline{c}|register| de la structure \mintinline{c}|thread|. Le registre \verb+%rsp+
+est le pointeur de pile. Notons qu'on ne peut pas manipuler directement le compteur ordinal. Mais celui-ci sera placé sur la pile
+lors de l'appel à la procédure \mintinline{c}|ctxsw| (nous allons détailler ce point après).
+\item Soit \verb+v+ le contenu du registre \verb+reg1+, alors l'instruction \verb+movq n(reg1), reg2+ (par exemple \verb+movq 8(%rsp),%rax+)
+mettra le contenu de l'adresse \verb#(v + n)# dans le registre \verb+reg2+~;
+\item Soit \verb+v+ le contenu du registre \verb+reg1+, alors l'instruction \verb+movq reg2, n(reg1)+ (par exemple \verb+movq %rcx,8(%rax)+)
+mettra le contenu du registre \verb+reg2+ à l'adresse \verb#(v + n)#.\\
+\end{itemize} 
+
+La procédure \mintinline{c}|ctxsw| est à compléter dans le fichier \mintinline{c}|ctxsw.S|. Le squelette de cette procédure est le suivant~:
+\begin{minted}{gas}
+        .globl  ctxsw
+ctxsw:
+        ...
+        ret
+\end{minted}
+
+Lors de l'appel à cette procédure, la pile du \emph{thread} courant sera dans l'état représenté dans la figure \ref{fig:stack3}. On peut voir 
+que l'adresse de retour est déjà dans la pile du \emph{thread} courant et n'a donc pas besoin d'être sauvegardée autre part. L'adresse du
+tableau \mintinline{c}|old_registers| est dans le registre \verb+%rdi+ et celle du tableau \mintinline{c}|new_registers| se trouve dans le registre \verb+%rsi+. 
+Il reste donc à sauvegarder les registres dans le tableau
+\mintinline{c}|old_registers| et mettre à jour les registres grâce au contenu du tableau \mintinline{c}|new_registers|.\\
+
+\begin{figure}[!htpb]
+\begin{center}
+\begin{verbatim}
+          vers les adresses basses
+
+          +-----------------------------------------------------------------+
+          | ...                                                             |
+          +-----------------------------------------------------------------+
+          | @ retour (dans reschedule ou début du code de enable_interrupt) | <-- %rsp
+          +-----------------------------------------------------------------+
+          | ...                                                             |
+          +-----------------------------------------------------------------+
+
+\end{verbatim}
+\caption{\'Etat de la pile du \emph{thread} courant lors de l'appel à \emph{ctxsw}}
+\label{fig:stack3}
+\end{center}
+\end{figure}
+
+\textbf{Question 3~:} Implémenter la procédure \mintinline{c}|void ctxsw(long* old_registers, long* new_registers)| (fichier \verb+ctxsw.S+).
+
+\section{Initialisation du système}
+
+Il nous reste à initialiser le système et à créer un \emph{thread} démon qui prendra la main lorsqu'aucun \emph{thread} ne sera prêt
+à s'exécuter (ce qui peut arriver si tous les \emph{threads} sont endormis par exemple). La procédure \mintinline{c}|void sysinit()| 
+(fichier \verb+initialize.c+)
+est déjà écrite. Il vous reste à écrire la procédure \mintinline{c}|void nulluser()| (fichier \verb+initialize.c+) qui 
+est le point d'entrée de la bibliothèque (le \mintinline{c}|main| étant le point d'entrée du programme utilisateur). Une ébauche de la procédure
+\mintinline{c}|void nulluser()| est donnée ci-dessous~:
+
+\begin{minted}{c}
+void nulluser() {
+  sysinit();
+  //Créer le thread main et le lancer
+
+  //Si on arrive ici c'est que plus aucun autre thread n'est prêt à s'exécuter (en effet,
+  //le thread nulluser a la plus faible priorité). Si la liste 'alive_list' est vide, on
+  //peut quitter le programme sinon, il faut effectuer une attente active.
+
+  printf("no more thread to run... bye\n");
+  _exit(0);
+}
+\end{minted}
+
+\textbf{Question 4~:} Implémenter la procédure \mintinline{c}|void nulluser()| (fichier \verb+initialize.c+).
+
+\end{document}
