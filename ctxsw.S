@@ -21,7 +21,7 @@ ctxsw:
 	movq    %rsi, RSI(%rdi)
 	movq    %rdi, RDI(%rdi)
 	movq    %rsp, RSP(%rdi)
-    movq    %rbp, RBP(%rdi)
+	movq    %rbp, RBP(%rdi)
 	movq    %r8,  R8(%rdi)
 	movq    %r9,  R9(%rdi)
 	movq    %r10, R10(%rdi)
